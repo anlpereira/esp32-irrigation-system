@@ -14,7 +14,7 @@
 #define SOIL_SENSOR_PIN A1
 #define TEMP_SENSOR_PIN 4
 #define LED_PIN 9
-#define LED_MAX_BRIGHTNESS 230
+#define LED_MAX_BRIGHTNESS 255
 #define ANALOG_READ_RESOLUTION 4095
 
 // --- WIFI SETTINGS ---
@@ -45,7 +45,7 @@ int soilMoistureValue = 0;
 unsigned long previousMillisSoil = 0;
 const long intervalSoil = 60000; // 1 minute
 const int drySoilValue = 4095;
-const int wetSoilValue = 1800;
+const int wetSoilValue = 2900;
 const int soilMoistureMinLimit = 30;
 
 // --- TEMPERATURE SENSOR ---
@@ -60,24 +60,29 @@ int ledValue = 0;
 int ledBrightness = 0;
 const int sunriseStartHour = 8;
 const int sunsetEndHour = 20;
+unsigned long previousMillisLED = 0;
+const long intervalLEDPrint = 5000; // Print LED brightness every 5 seconds
+const int ledDayBrightness = (int)(LED_MAX_BRIGHTNESS * 0.8); // 80% PWM during the day
 
 // --- WEB SERVER ---
 WebServer server(80);
 const char* host = "esp32";
-const char* googleAppsScriptURL = "https://script.google.com/macros/s/AKfycbw8esoFP9lHf0pE64-GdYSsJSfSQSRa7Epy5e-asbYlYTah39hHMMX3x2OZ-ONvthGp/exec";
+const String googleAppsScriptGetDataURL = "https://script.google.com/macros/s/AKfycbxDGVDkJq0flGF0HogjjrIVOAG8Q-uaoD4vKtTMi1WsdYlbAmH-qf-iIzLhfkdVanJi/exec"; // URL for fetching data
+const String googleAppsScriptURL = "https://script.google.com/macros/s/AKfycbxDGVDkJq0flGF0HogjjrIVOAG8Q-uaoD4vKtTMi1WsdYlbAmH-qf-iIzLhfkdVanJi/exec";
 
-//Interval Upload 
+//Interval Upload
 unsigned long previousMillisUpload = 0;
 const long intervalUpload = 600000; // 10 minutes in milliseconds, the same as the other intervals
 
-String globalCurrentTimeStr;
+String globalCurrentDayStr;
+String globalHourTimeStr;
 String globalTemperatureValue;
 String globalMoisturePercentage;
 String globalHumidityData = "";
-
+String globalHumidityValue;
 // --- JSON ---
 StaticJsonDocument<3000> dataJson;
-String currentTimeStr;
+String currentDayStr;
 
 // --- GRAPH ---
 String humidityData = "";
@@ -143,9 +148,51 @@ void timeUpdate(){
   if(currentMillisTime - previousMillisTime >= intervalTime){
     previousMillisTime = currentMillisTime;
      timeClient.update();
-    currentTimeStr = timeClient.getFormattedTime();
+    
+    time_t epochTime = timeClient.getEpochTime();
+    struct tm * ptm = localtime(&epochTime);
+
+    int year = ptm->tm_year + 1900;
+    int month = ptm->tm_mon + 1;
+    int day = ptm->tm_mday;
+     int hour = ptm->tm_hour;
+     int minute = ptm->tm_min;
+      int second = ptm->tm_sec;
+    
+    String monthStr;
+     switch (month) {
+      case 1: monthStr = "Jan"; break;
+      case 2: monthStr = "Fev"; break;
+      case 3: monthStr = "Mar"; break;
+      case 4: monthStr = "Abr"; break;
+      case 5: monthStr = "Mai"; break;
+      case 6: monthStr = "Jun"; break;
+      case 7: monthStr = "Jul"; break;
+      case 8: monthStr = "Ago"; break;
+      case 9: monthStr = "Set"; break;
+      case 10: monthStr = "Otu"; break;
+      case 11: monthStr = "Nov"; break;
+      case 12: monthStr = "Dez"; break;
+      default: monthStr = ""; break;
+    }
+
+    currentDayStr = String(day) + "-" + monthStr + "-" + String(year);
+    String hourStr = String(hour);
+    String minuteStr = String(minute);
+    if (hour < 10){
+     hourStr = "0" + String(hour);
+    }
+    if(minute < 10){
+      minuteStr = "0" + String(minute);
+    }
+    String currentTime = hourStr + ":" + minuteStr;
+   
+    globalCurrentDayStr = currentDayStr;
+    globalHourTimeStr = currentTime;
     Serial.print("Current Time: ");
-    Serial.println(currentTimeStr);
+    Serial.println(globalCurrentDayStr);
+    Serial.print("Current Hour: ");
+    Serial.println(globalHourTimeStr);
   }
 }
 
@@ -183,16 +230,16 @@ void webPumpOn() {
     Serial.println("Pump on (Web)");
 }
 
-void uploadDataToGoogleDrive(String time, String temperature, String moisture, String humidityData) {
+void uploadDataToGoogleDrive(String day, String time, String temperature, String humidity) {
   HTTPClient http;
   http.begin(googleAppsScriptURL);
   http.addHeader("Content-Type", "application/json");
 
-  StaticJsonDocument<1024> jsonDocument;
+  StaticJsonDocument<256> jsonDocument; // Reduced buffer size
+  jsonDocument["day"] = day;
   jsonDocument["time"] = time;
   jsonDocument["temperature"] = temperature;
-  jsonDocument["moisture"] = moisture;
-  jsonDocument["humidityData"] = humidityData;
+  jsonDocument["humidity"] = humidity;
 
   String json;
   serializeJson(jsonDocument, json);
@@ -210,17 +257,61 @@ void uploadDataToGoogleDrive(String time, String temperature, String moisture, S
   http.end();
 }
 
+void handleData() {
+  String type = server.arg("type"); // Get request type parameter
+  String interval = server.arg("interval"); // Get interval parameter
+
+  if (type == "graph") {  // Handle Graph data retrieval
+
+    if (interval.length() == 0) {
+      interval = "1d";
+    }
+
+    HTTPClient http;
+    http.begin(googleAppsScriptGetDataURL + "?interval=" + interval);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    int httpResponseCode = http.GET();
+    String payload = "";
+
+    if (httpResponseCode > 0) {
+      payload = http.getString();
+      Serial.println(payload);
+    } else {
+       Serial.print("Error fetching data. HTTP Response code: ");
+       Serial.println(httpResponseCode);
+       payload = "{\"error\": \"Failed to fetch data from Google Apps Script\"}";
+     }
+     http.end();
+
+    server.send(200, "application/json", payload);
+
+  } else if (type == "periodic") { // Handle periodic data sending
+          StaticJsonDocument<256> dataJson;
+          dataJson["day"] = globalCurrentDayStr;
+          dataJson["time"] =  globalHourTimeStr;
+          dataJson["temperature"] = String(globalTemperatureValue.toFloat(), 1);
+          dataJson["humidity"] = globalHumidityValue;
+            String jsonString;
+           serializeJson(dataJson, jsonString);
+           server.send(200, "application/json", jsonString);
+
+  } else {
+        server.send(400, "text/plain", "Invalid request type"); // Handle invalid requests
+    }
+}
 
 void uploadData() {
   unsigned long currentMillisUpload = millis();
   if (currentMillisUpload - previousMillisUpload >= intervalUpload) {
       previousMillisUpload = currentMillisUpload;
-      if(globalCurrentTimeStr.length() > 0 && globalTemperatureValue.length() > 0 && globalMoisturePercentage.length() > 0) {
-          uploadDataToGoogleDrive(globalCurrentTimeStr, globalTemperatureValue, globalMoisturePercentage, globalHumidityData);
-           globalHumidityData = "";
+      if(globalCurrentDayStr.length() > 0 && globalTemperatureValue.length() > 0 && globalMoisturePercentage.length() > 0 && globalHumidityValue.length() > 0) {
+          uploadDataToGoogleDrive(globalCurrentDayStr, globalHourTimeStr, globalTemperatureValue, globalHumidityValue);
+          Serial.println("Data sent to GoogleSheet");
+          globalHumidityData = "";
       }
     }
 }
+
 
 // --- SOIL MOISTURE SENSOR ---
 void readSoilMoisture() {
@@ -244,15 +335,15 @@ void readSoilMoisture() {
       moisturePercentage = 100;
     }
 
-    String dataPoint = "\"" + currentTimeStr + "\": " + String(moisturePercentage);
+    String dataPoint = "\"" + currentDayStr + "\": " + String(moisturePercentage);
     if (globalHumidityData.length() > 0) {
         globalHumidityData += ", ";
     }
         globalHumidityData += dataPoint;
 
-     globalCurrentTimeStr = currentTimeStr;
+     globalCurrentDayStr = currentDayStr;
       globalMoisturePercentage = String(moisturePercentage);
-    
+    globalHumidityValue = String(moisturePercentage); // Same value of moisture
     Serial.print("Soil Moisture: ");
     Serial.print(moisturePercentage);
     Serial.println("%");
@@ -281,20 +372,21 @@ void readTemperature() {
 // --- LED CONTROL ---
 void controlLED() {
   int currentHour = timeClient.getHours();
-  if (currentHour >= sunriseStartHour && currentHour < sunsetEndHour) {
-    // Calculate brightness percentage based on time of day
-    float progress = (float)(currentHour - sunriseStartHour) / (sunsetEndHour - sunriseStartHour);
-    if (progress <= 0.5) {
-        ledBrightness = map(progress * 100, 0, 50, 0, LED_MAX_BRIGHTNESS);
+  
+    // Set LED to 80% brightness during the day
+    if (currentHour >= sunriseStartHour && currentHour < sunsetEndHour) {
+      ledBrightness = ledDayBrightness;
     } else {
-        ledBrightness = map((1 - progress) * 100, 0, 50, 0, LED_MAX_BRIGHTNESS);
+      ledBrightness = 0; // LED off
     }
     analogWrite(LED_PIN, ledBrightness);
-    Serial.print("LED Brightness: ");
-    Serial.println(ledBrightness);
-  } else {
-    analogWrite(LED_PIN, 0); // LED off
-  }
+
+    unsigned long currentMillisLED = millis();
+    if (currentMillisLED - previousMillisLED >= intervalLEDPrint) {
+      previousMillisLED = currentMillisLED;
+      Serial.print("LED Brightness: ");
+      Serial.println(ledBrightness);
+    }
 }
 
 // --- WEB SERVER ---
@@ -306,48 +398,113 @@ void setupWebRoutes() {
 }
 
 void handleRoot() {
-  String html = "";
+    String html = "";
 
-  // --- HEAD SECTION ---
-  html += "<!DOCTYPE html><html><head><title>ESP32 Irrigation System</title>";
-  html += "<script src=\"https://cdn.jsdelivr.net/npm/chart.js\"></script>";
-  html += "<style>body { font-family: sans-serif; padding: 20px; } button { padding: 10px 20px; margin-top: 10px; }</style>";
-  html += "</head><body>";
+    // --- HEAD SECTION ---
+    html += "<!DOCTYPE html><html><head><title>ESP32 Irrigation System</title>";
+    html += "<script src=\"https://cdn.jsdelivr.net/npm/chart.js\"></script>";
+    html += "<style>body { font-family: sans-serif; padding: 20px; } button { padding: 10px 20px; margin-top: 10px; }</style>";
+    html += "</head><body>";
 
-  // --- BODY CONTENT ---
-  html += "<h1>ESP32 Irrigation System</h1>";
-  html += "<p>Current Time: <span id='time'></span></p>";
-  html += "<p>Temperature: <span id='temperature'></span> °C</p>";
-  html += "<p>Soil Moisture: <span id='moisture'></span> %</p>";
-  html += "<button onclick='activatePump()'>Activate Pump (5 seconds)</button><br><br>";
-  html += "<canvas id='myCanvas' width='800' height='300'></canvas>";
+    // --- BODY CONTENT ---
+    html += "<h1>ESP32 Irrigation System</h1>";
+    html += "<p>Current Time: <span id='time'></span></p>";
+    html += "<p>Temperature: <span id='temperature'></span> °C</p>";
+    html += "<p>Soil Moisture: <span id='moisture'></span> %</p>";
+    html += "<button onclick='activatePump()'>Activate Pump (5 seconds)</button><br><br>";
+    html += "<canvas id='myCanvas' width='800' height='300'></canvas>";
 
-  // --- JAVASCRIPT SECTION ---
-  html += "<script>";
-  html += "var lastData = null; var myChart = null; function updateData() {fetch('/data.json').then(response => response.json()).then(data => { document.getElementById('time').innerText = data.time; document.getElementById('temperature').innerText = data.temperature; document.getElementById('moisture').innerText = data.moisture; if (data.humidityData != null && data.temperatureData != null){drawChart(JSON.parse('{' + data.humidityData + '}'), data.temperatureData);} lastData = data;}).catch(error => console.error('Error fetching data:', error));} setInterval(updateData, 60000); updateData(); function activatePump() { fetch('/pump').then(response => response.text()).then(message => alert(message)).catch(error => console.error('Error:', error)); }; function drawChart(data, tempData) { const labels = Object.keys(data); const values = Object.values(data); const tempValues = [].fill(parseFloat(tempData), 0, labels.length) ; const ctx = document.getElementById('myCanvas').getContext('2d'); if (myChart) { myChart.destroy(); } myChart = new Chart(ctx, { type: 'line', data: { labels: labels, datasets: [{ label: 'Humidity (%)', data: values, borderColor: 'blue', borderWidth: 1, tension: 0.4 , yAxisID: 'y1'}, {label: 'Temperature (°C)', data: tempValues, borderColor: 'red', borderWidth: 1, tension: 0.4, yAxisID: 'y2'}] }, options: { scales: { y1: { beginAtZero: true, position: 'left' }, y2: { position: 'right' } }, plugins: { legend: { display: true } } } }); };";
+    // --- JAVASCRIPT SECTION ---
+   html += "<script>";
+   html += "let myChart = null;";
+
+
+   html += "function updateData() {";
+   html += "   fetch('/data.json?type=periodic')";
+   html += "       .then(response => response.json())";
+   html += "       .then(data => {";
+      html += "       if(data && data.time && data.temperature && data.moisture){";
+      html += "            document.getElementById('time').innerText = data.time;";
+         html += "         document.getElementById('temperature').innerText = data.temperature;";
+      html += "          document.getElementById('moisture').innerText = data.moisture;";
+      html += "        }";
+     html += "       }).catch(error => console.error('Error fetching data:', error));";
+    html += "}";
+
+   html += "setInterval(updateData, 60000);";
+    html += "updateData();";
+
+  html += " function drawChart(data) {";
+    html += "    try{";
+    html += "      const temperatureData = data.data.map(row => parseFloat(row[1]));";
+   html += "    const moistureData = data.data.map(row => parseFloat(row[2]));";
+  html += "    const timeData = data.data.map(row => row[0]);";
+   html += "   const ctx = document.getElementById('myCanvas').getContext('2d');";
+  html += "   if (myChart) {";
+     html += "       myChart.destroy();";
+    html += "   }";
+    html += "   myChart = new Chart(ctx, {";
+     html += "    type: 'line',";
+    html += "    data: {";
+    html += "      labels: timeData,";
+     html += "       datasets: [{";
+   html += "         label: 'Temperature (°C)',";
+     html += "           data: temperatureData,";
+  html += "           borderColor: 'red',";
+    html += "            borderWidth: 1,";
+     html += "        tension: 0.4,";
+     html += "         yAxisID: 'y1'";
+    html += "       }, {";
+    html += "        label: 'Moisture (%)',";
+    html += "         data: moistureData,";
+    html += "          borderColor: 'blue',";
+    html += "           borderWidth: 1,";
+   html += "            tension: 0.4,";
+   html += "           yAxisID: 'y2'";
+   html += "      }]";
+   html += "   },";
+   html += "   options: {";
+     html += "      scales: {";
+   html += "          y1: {";
+   html += "             beginAtZero: true,";
+    html += "             position: 'left'";
+   html += "         },";
+    html += "        y2: {";
+    html += "           position: 'right'";
+   html += "         },";
+    html += "        x: {";
+   html += "            display: true,";
+    html += "            title: {";
+     html += "              display: true,";
+    html += "             text: 'Time'";
+    html += "           }";
+    html += "         }";
+   html += "       },";
+     html += "      plugins: {";
+     html += "        legend: {";
+      html += "          display: true";
+      html += "      }";
+    html += "      }";
+   html += "   }";
+    html += "  });";
+     html += "    }catch(error){";
+      html += "      console.error('Error parsing data', error);";
+      html += "   }";
+   html += " }";
+
+   html += "    fetch('/data.json?type=graph&interval=1d')";
+   html += "        .then(response => response.json())";
+   html += "        .then(data => {";
+    html += "          drawChart(data);";
+    html += "        })";
+    html += "        .catch(error => console.error('Error fetching data:', error));";
+
   html += "</script>";
-  // --- END OF HTML ---
-  html += "</body></html>";
-
+    // --- END OF HTML ---
+    html += "</body></html>";
   server.send(200, "text/html", html);
 }
 
-void handleData() {
-  dataJson.clear();
-  dataJson["time"] = currentTimeStr;
-  dataJson["temperature"] = String(temperatureValue, 1);
-   int moisturePercentage = map(soilMoistureValue, drySoilValue, wetSoilValue, 0, 100);
-    if (moisturePercentage < 0) moisturePercentage = 0;
-    else if (moisturePercentage > 100) moisturePercentage = 100;
-    dataJson["moisture"] = String(moisturePercentage);
-    if(humidityData.length() > 0){
-         dataJson["humidityData"] = humidityData;
-    }
-  
-    String jsonString;
-    serializeJson(dataJson, jsonString);
-    server.send(200, "application/json", jsonString);
-}
 
 // --- EEPROM FUNCTIONS ---
 void writeCredentialsToEEPROM() {
